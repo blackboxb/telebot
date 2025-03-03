@@ -1,20 +1,13 @@
+import telebot
 import sqlite3
 import threading
 import time
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, ConversationHandler
 
-# Define states for order process
-NAME, MOBILE, HOSTEL, WING, CONFIRM_ORDER = range(5)
-
-# Store status (open/closed)
+bot = telebot.TeleBot("7573502469:AAGGyXpPFlzUwUJ3NpfzF9S0dGvDgk2ewKM")
 store_open = True
-
-# Connect to database
 conn = sqlite3.connect("blackbox.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Create tables
 cursor.execute('''CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY, 
                     name TEXT, 
@@ -28,123 +21,98 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS inventory (
                     quantity INTEGER)''')
 conn.commit()
 
-def start(update: Update, context: CallbackContext) -> int:
-    update.message.reply_text("Welcome to Black Box! Please enter your name:")
-    return NAME
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(message, f"Hey! {message.from_user.first_name}, welcome to Black Box! Use /order to place an order.")
 
-def get_name(update: Update, context: CallbackContext) -> int:
-    context.user_data['name'] = update.message.text
-    update.message.reply_text("Enter your mobile number:")
-    return MOBILE
+@bot.message_handler(commands=['order'])
+def order(message):
+    bot.reply_to(message, "Please enter your name:")
+    bot.register_next_step_handler(message, get_name)
 
-def get_mobile(update: Update, context: CallbackContext) -> int:
-    context.user_data['mobile'] = update.message.text
-    update.message.reply_text("Select your hostel:", reply_markup=ReplyKeyboardMarkup([['KBH', 'GBH']], one_time_keyboard=True))
-    return HOSTEL
+def get_name(message):
+    name = message.text
+    bot.send_message(message.chat.id, "Enter your mobile number:")
+    bot.register_next_step_handler(message, get_mobile, name)
 
-def get_hostel(update: Update, context: CallbackContext) -> int:
-    context.user_data['hostel'] = update.message.text
-    update.message.reply_text("Select your wing:", reply_markup=ReplyKeyboardMarkup([['East', 'West', 'South']], one_time_keyboard=True))
-    return WING
+def get_mobile(message, name):
+    mobile = message.text
+    bot.send_message(message.chat.id, "Select your hostel: KBH or GBH")
+    bot.register_next_step_handler(message, get_hostel, name, mobile)
 
-def get_wing(update: Update, context: CallbackContext) -> int:
-    context.user_data['wing'] = update.message.text
-    update.message.reply_text(f"Confirm order?\nName: {context.user_data['name']}\nMobile: {context.user_data['mobile']}\nHostel: {context.user_data['hostel']}\nWing: {context.user_data['wing']}", 
-                              reply_markup=ReplyKeyboardMarkup([['Yes', 'Cancel']], one_time_keyboard=True))
-    return CONFIRM_ORDER
+def get_hostel(message, name, mobile):
+    hostel = message.text
+    bot.send_message(message.chat.id, "Select your wing: East, West, or South")
+    bot.register_next_step_handler(message, get_wing, name, mobile, hostel)
 
-def confirm_order(update: Update, context: CallbackContext) -> int:
-    if update.message.text.lower() == 'yes':
+def get_wing(message, name, mobile, hostel):
+    wing = message.text
+    bot.send_message(message.chat.id, f"Confirm order?\nName: {name}\nMobile: {mobile}\nHostel: {hostel}\nWing: {wing}\nType 'yes' to confirm or 'cancel' to abort.")
+    bot.register_next_step_handler(message, confirm_order, name, mobile, hostel, wing)
+
+def confirm_order(message, name, mobile, hostel, wing):
+    if message.text.lower() == 'yes':
         cursor.execute("INSERT INTO orders (name, mobile, hostel, wing, status, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-                       (context.user_data['name'], context.user_data['mobile'], context.user_data['hostel'], context.user_data['wing'], "Pending", int(time.time())))
+                       (name, mobile, hostel, wing, "Pending", int(time.time())))
         conn.commit()
-        update.message.reply_text("Your order has been placed! Managers will confirm soon.")
+        bot.send_message(message.chat.id, "Your order has been placed! Managers will confirm soon.")
     else:
-        update.message.reply_text("Order cancelled.")
-    return ConversationHandler.END
+        bot.send_message(message.chat.id, "Order cancelled.")
 
-def view_orders(update: Update, context: CallbackContext):
+@bot.message_handler(commands=['view_orders'])
+def view_orders(message):
     cursor.execute("SELECT * FROM orders WHERE status='Pending'")
     orders = cursor.fetchall()
-    if orders:
-        message = "Pending Orders:\n" + '\n'.join([f"{order[0]} - {order[1]} ({order[2]})" for order in orders])
-    else:
-        message = "No pending orders."
-    update.message.reply_text(message)
+    response = "Pending Orders:\n" + '\n'.join([f"{order[0]} - {order[1]} ({order[2]})" for order in orders]) if orders else "No pending orders."
+    bot.reply_to(message, response)
 
-def accept_order(update: Update, context: CallbackContext):
-    order_id = context.args[0]
+@bot.message_handler(commands=['accept_order'])
+def accept_order(message):
+    order_id = message.text.split()[1]
     cursor.execute("UPDATE orders SET status='Accepted' WHERE id=?", (order_id,))
     conn.commit()
-    update.message.reply_text(f"Order {order_id} accepted.")
+    bot.reply_to(message, f"Order {order_id} accepted.")
 
-def cancel_order(update: Update, context: CallbackContext):
-    order_id = context.args[0]
+@bot.message_handler(commands=['cancel_order'])
+def cancel_order(message):
+    order_id = message.text.split()[1]
     cursor.execute("UPDATE orders SET status='Cancelled' WHERE id=?", (order_id,))
     conn.commit()
-    update.message.reply_text(f"Order {order_id} cancelled.")
+    bot.reply_to(message, f"Order {order_id} cancelled.")
 
-def update_order_status(update: Update, context: CallbackContext):
-    order_id, status = context.args[0], context.args[1]
-    cursor.execute("UPDATE orders SET status=? WHERE id=?", (status, order_id))
-    conn.commit()
-    update.message.reply_text(f"Order {order_id} updated to {status}.")
-
-def toggle_store(update: Update, context: CallbackContext):
+@bot.message_handler(commands=['toggle_store'])
+def toggle_store(message):
     global store_open
     store_open = not store_open
-    update.message.reply_text(f"Store is now {'OPEN' if store_open else 'CLOSED'}.")
+    bot.reply_to(message, f"Store is now {'OPEN' if store_open else 'CLOSED'}.")
 
-def add_inventory(update: Update, context: CallbackContext):
-    item, quantity = context.args[0], int(context.args[1])
+@bot.message_handler(commands=['add_inventory'])
+def add_inventory(message):
+    args = message.text.split()
+    item, quantity = args[1], int(args[2])
     cursor.execute("INSERT INTO inventory (item, quantity) VALUES (?, ?) ON CONFLICT(item) DO UPDATE SET quantity = quantity + ?", (item, quantity, quantity))
     conn.commit()
-    update.message.reply_text(f"Added {quantity} of {item} to inventory.")
+    bot.reply_to(message, f"Added {quantity} of {item} to inventory.")
 
-def check_inventory(update: Update, context: CallbackContext):
+@bot.message_handler(commands=['check_inventory'])
+def check_inventory(message):
     cursor.execute("SELECT * FROM inventory")
     items = cursor.fetchall()
-    message = "Inventory:\n" + '\n'.join([f"{item[0]}: {item[1]}" for item in items]) if items else "Inventory is empty."
-    update.message.reply_text(message)
+    response = "Inventory:\n" + '\n'.join([f"{item[0]}: {item[1]}" for item in items]) if items else "Inventory is empty."
+    bot.reply_to(message, response)
 
 def pending_order_reminder():
     while True:
-        time.sleep(300)  # Check every 5 minutes
+        time.sleep(300)
         cursor.execute("SELECT id FROM orders WHERE status='Pending' AND timestamp <= ?", (int(time.time()) - 300,))
         pending_orders = cursor.fetchall()
         if pending_orders:
             message = "Reminder: The following orders are still pending: " + ', '.join([str(order[0]) for order in pending_orders])
-            print("Managers should be notified:", message)  # Replace with bot notification
+            print("Managers should be notified:", message)
 
 def main():
-    updater = Updater("YOUR_BOT_TOKEN", use_context=True)
-    dp = updater.dispatcher
-
     threading.Thread(target=pending_order_reminder, daemon=True).start()
-
-    order_conv = ConversationHandler(
-        entry_points=[CommandHandler('order', start)],
-        states={
-            NAME: [MessageHandler(Filters.text & ~Filters.command, get_name)],
-            MOBILE: [MessageHandler(Filters.text & ~Filters.command, get_mobile)],
-            HOSTEL: [MessageHandler(Filters.text & ~Filters.command, get_hostel)],
-            WING: [MessageHandler(Filters.text & ~Filters.command, get_wing)],
-            CONFIRM_ORDER: [MessageHandler(Filters.text & ~Filters.command, confirm_order)]
-        },
-        fallbacks=[]
-    )
-
-    dp.add_handler(order_conv)
-    dp.add_handler(CommandHandler("view_orders", view_orders))
-    dp.add_handler(CommandHandler("accept_order", accept_order))
-    dp.add_handler(CommandHandler("cancel_order", cancel_order))
-    dp.add_handler(CommandHandler("update_order_status", update_order_status))
-    dp.add_handler(CommandHandler("toggle_store", toggle_store))
-    dp.add_handler(CommandHandler("add_inventory", add_inventory))
-    dp.add_handler(CommandHandler("check_inventory", check_inventory))
-
-    updater.start_polling()
-    updater.idle()
+    bot.polling()
 
 if __name__ == '__main__':
     main()
